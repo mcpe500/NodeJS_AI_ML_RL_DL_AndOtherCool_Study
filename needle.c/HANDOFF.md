@@ -1,81 +1,53 @@
-# Handoff — needle.c (2026-07-14)
+# Handoff — needle.c (2026-07-14, real-FC path)
 
 Branch: `needle.c/jul14`  
-Remote: `origin` → https://github.com/mcpe500/NodeJS_AI_ML_RL_DL_AndOtherCool_Study  
-Commits: `5d79fc5` framework+train+playground · `d9a895a` drop dbg junk  
-PR: https://github.com/mcpe500/NodeJS_AI_ML_RL_DL_AndOtherCool_Study/pull/new/needle.c/jul14
+Remote: https://github.com/mcpe500/NodeJS_AI_ML_RL_DL_AndOtherCool_Study
 
-## What shipped
+## Shipped this pass
 
-- C11 framework `nd_*` (tensor, autograd, nn, optim, stream dataset, ckpt)
-- Tests green: `make -C needle.c/tests`
-- Models A/B/C full-epoch train on stream fixtures, f32, peak RSS ≤900
-- Eval harness + greedy id infer
-- **Playground web UI** stub: `make -C needle.c playground` → **0.0.0.0:7860**
-- Docs: MASTER_PLAN, PLAN, program.txt, README (user vs Cactus gap honest)
+| Phase | Status | Notes |
+|-------|--------|-------|
+| P0 docs | ✅ | MASTER/PLAN/program/README/HANDOFF |
+| P1 BPE | ✅ | `tokenizer/train_bpe.py` max_tok_len=16, vocab=512, merges=423; `nd_bpe_*`; `test_bpe` GREEN |
+| P2 synth | ✅ | 10 tools, 2k/200/200 JSONL → NDSET001; `test_fc_bin` GREEN |
+| P3 retrain A | ✅ smoke | 200-row smoke, 20 ep, loss 2.81→0.23, token_EM=0.39, RSS=14MB, `ckpts/sanity_fc.nd` |
+| P4 generate | ✅ | live encode→greedy→detok; playground no hardcode; `test_generate` forbids SF stub |
+| P5 eval | ✅ | accepts BPE vocab args; token_EM printed |
+| P6 push | ⏳ | this commit |
 
-## User try (web)
+## Results (smoke FC)
 
-```bash
-cd needle.c
-make playground          # binds 0.0.0.0:7860
-# browser: http://127.0.0.1:7860/  or http://<device-ip>:7860/
-# PORT=8765 make playground   # if busy
-# Ctrl+C stop
+```
+vocab=512 n_params=106950 B=4 epochs=20
+first_loss=5.10 last_loss=0.27
+token_EM=0.3866 val_full_call_EM=0.0000 peak_rss_mb=14.1 status=keep
 ```
 
-**Honest status:** form works; Generate shows **reference** tool JSON, not live model.  
-Missing for Cactus parity: BPE, FC train data, `generate(query, tools)`.
+Full-call EM=0: free-gen underfit (loops `[{"name":"`). Teacher-force token EM rising. Path is live, not stub.
 
-Cactus real playground (other repo): https://cactuscompute.com/blog/needle
-
-## Dev checks that work
+## How to run
 
 ```bash
-make -C framework && make -C tests
-make smoke MODEL=01-sanity
-make train MODEL=02-pilot-6m
-make train MODEL=03-full-26m
-make -C eval && ./eval/evaluate A data/smoke.bin models/01-sanity/ckpts/sanity.nd
+python3 tokenizer/train_bpe.py --vocab-size 512 --extra-corpus tokenizer/fc_corpus.txt
+python3 data/synth/gen_fc.py                       # 2k/200/200
+# optional: build fc_corpus from JSONL first (see tools flow)
+python3 tools/jsonl_to_bin.py --jsonl data/raw/train.jsonl --out data/fc_train.bin
+python3 tools/jsonl_to_bin.py --jsonl data/raw/val.jsonl   --out data/fc_val.bin
+make -C tests
+make fc                                            # or: models/01-sanity fc on smoke bin
+make eval
 make infer
-make chat-demo
+make playground                                    # 0.0.0.0:7860 live
 ```
 
-## Observed train results (fixture vocab=64)
+## Known gaps / next
 
-| Model | params | epochs | last loss | peak_rss | status |
-|-------|--------|--------|-----------|----------|--------|
-| A | 78k | 20 | ~0.55 | ~5 MB | keep |
-| B | 4.0M | 10 | ~0.44 | ~65 MB | keep |
-| C | 22M | 3 | ~1.0 | ~346 MB | keep |
+1. Free-gen quality: need more data/epochs or longer train on full 2k; optional overfit 50 identical rows to prove gen path.
+2. `val_full_call_EM` is teacher-force full-seq match — free-gen needs separate metric.
+3. Full 2k train is slow on Termux (~10+ min/epoch at T=128); smoke first is correct.
+4. Model B/C on FC bins, KV-cache, weighted CE — after free-gen looks sane.
 
-Ckpts/logs/bins gitignored — regenerate via `make train`.
+## HW rules (don't regress)
 
-## Critical ownership rules
-
-1. Free graph: `free(loss)` then `free(logits)` then batch leaves each step.
-2. `nd_module_free` frees children first — `free_state` must **not** free children again (was abort root cause).
-3. Peak RSS = VmHWM (never decreases); use `nd_current_rss_mb()` for live leak check.
-
-## Next (not done)
-
-1. BPE 8192 + real/synth function-calling JSONL → stream bins
-2. Wire `generate(query, tools)` into playground (real OUTPUT)
-3. Full attention backward (not just residual wq/wo path)
-4. Act-ckpt recompute for C (accum already there)
-5. KV-cache decode
-6. Optional: merge PR to main
-
-## Files map
-
-```
-needle.c/
-  framework/     libneedle.a sources + headers
-  tests/         unit + integration
-  models/01-sanity|02-pilot-6m|03-full-26m/
-  training/train_main.c   shared A/B/C entry
-  eval/evaluate.c
-  inference/{playground,chat_demo,generate}.c
-  data/schema.md
-  README.md  HANDOFF.md  program.txt  MASTER_PLAN.md
-```
+Peak RSS ≤900 · f32 · full epochs · stream · free graph every step.  
+Playground NEVER hardcodes reference JSON.

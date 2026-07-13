@@ -4,8 +4,8 @@ PyTorch-like **C11** framework (`nd_*`) + **attention-only** encoder–decoder
 for single-shot tool-calling JSON (Needle-style: no FFN, RoPE, ZCRMSNorm,
 gated residual, GQA, tied emb).
 
-**Status:** framework + tests green; models A/B/C full-epoch train on stream
-fixture complete (float32, peak RSS ≤ 900 MB).
+**Status:** framework + A/B/C fixture train green; **real FC path (BPE + synth
+JSONL + live generate)** in progress. Peak RSS ≤ 900 MB, f32, stream bins.
 
 ## HARDWARE AWARE (HARD — never violate)
 
@@ -30,11 +30,11 @@ Official Needle lets a **user** type English + tool schema → tool-call JSON:
 
 | | [Cactus Needle](https://cactuscompute.com/blog/needle#get-the-model) / [HF](https://huggingface.co/Cactus-Compute/needle) | **this repo (`needle.c`)** |
 |--|--|--|
-| UI | `needle playground` → http://127.0.0.1:7860 | **none** |
-| API | `generate(model, query, tools)` | **not wired** |
-| Tokenizer | BPE / shipped weights | **missing** |
-| Weights | pretrained 26M on tool-call data | synthetic id fixtures only (vocab=64) |
-| Example in | natural language | token ids / metrics |
+| UI | `needle playground` → http://127.0.0.1:7860 | `make playground` → 0.0.0.0:7860 |
+| API | `generate(model, query, tools)` | `inference/generate.c` (BPE + greedy) |
+| Tokenizer | BPE / shipped weights | `tokenizer/{vocab.json,merges.txt}` + `nd_bpe_*` |
+| Weights | pretrained 26M on tool-call data | `make fc` → `ckpts/sanity_fc.nd` (vocab≈438) |
+| Example in | natural language | query+tools JSON → model detok string |
 
 **Cactus example (reference only — not runnable here yet):**
 
@@ -49,19 +49,19 @@ OUTPUT:        [{"name":"get_weather","arguments":{"location":"San Francisco"}}]
 #   git clone https://github.com/cactus-compute/needle.git && cd needle && source ./setup
 #   needle playground   # http://127.0.0.1:7860
 
-# needle.c — local web UI (binds 0.0.0.0:7860):
-make playground
-# open http://127.0.0.1:7860/   or http://<phone-ip>:7860/ on LAN
-# PORT=8765 make playground    # if 7860 busy
-
-# CLI stub (same I/O contract, no server):
-make chat-demo
+# needle.c — real text→tool train then live playground:
+python3 tokenizer/train_bpe.py                  # once
+python3 data/synth/gen_fc.py                    # 2k/200/200 JSONL
+python3 tools/jsonl_to_bin.py --jsonl data/raw/train.jsonl --out data/fc_train.bin
+python3 tools/jsonl_to_bin.py --jsonl data/raw/val.jsonl   --out data/fc_val.bin
+make fc                                         # Model A on FC bins → ckpts/sanity_fc.nd
+make playground                                 # 0.0.0.0:7860 live generate()
+# open http://127.0.0.1:7860/
+make infer                                      # CLI generate(query,tools)
 ```
 
-**Bind:** `0.0.0.0` (all interfaces) — Termux OK; use phone browser or LAN.  
-**Stop:** Ctrl+C.
-
-**Why form is stub:** no BPE / FC corpus / `generate(query,tools)` yet. UI still runs so you can poke the contract; Generate shows reference JSON, not live weights. Dev checks below still the real green path.
+**Bind:** `0.0.0.0`. **Stop:** Ctrl+C.  
+Output is **live model detok** (may underfit on small A). Not hardcoded.
 
 ---
 
@@ -86,15 +86,13 @@ make smoke MODEL=01-sanity
 make -C eval
 ./eval/evaluate A data/smoke.bin models/01-sanity/ckpts/sanity.nd
 
-# 5) greedy decode on fixed token ids (NOT English)
-make infer
+# 5) real FC train (BPE vocab + fc_train.bin)
+make fc
+# then: make eval / make infer / make playground
 
-# 6) B / C full epochs (still ≤900 MB peak)
+# 6) B / C full epochs on fixture bins (still ≤900 MB peak)
 make train MODEL=02-pilot-6m
 make train MODEL=03-full-26m
-
-# 7) user CLI stub (documents gap; does not call tools)
-make chat-demo
 ```
 
 Single-test targets:

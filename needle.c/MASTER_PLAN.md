@@ -502,22 +502,40 @@ CMake = stretch.
 
 | # | Milestone | GO / NO-GO |
 |---|-----------|------------|
-| M0 | Planning docs + skeleton | 5 docs; HW+TDD in each; dirs exist |
-| M1 | Tensor core | `tests/unit/test_tensor` green **written first** |
-| M2 | Autograd min + free-graph | finite-diff; RSS flat N steps |
-| M3 | Linear + AdamW + CE toy | overfit 10 rows; unit tests green |
-| M4 | ZCRMSNorm / RoPE / GQA / gate | oracle parity tests green |
-| M5 | Enc–dec + tied emb one step | integration test one batch |
-| M6 | Stream dataloader + ckpt | round-trip; no full-load assert |
-| M7 | Model A smoke overfit | CE↓; RSS≤900; smoke tests green |
-| M8 | BPE + data synth pipeline | encode fixtures; stream files exist |
-| M9 | Eval harness + metric fixtures | known scores; headline printed |
-| M10 | Model A baseline row | results.tsv keep/crash |
-| M11 | Model B pilot baseline | metrics + RSS OK |
-| M12 | KV-cache inference | JSON calls on smoke prompts |
+| M0 | Planning docs + skeleton | ✅ done |
+| M1 | Tensor core | ✅ `tests/unit/test_tensor` green |
+| M2 | Autograd min + free-graph | ✅ finite-diff; RSS flat |
+| M3 | Linear + AdamW + CE toy | ✅ overfit toy |
+| M4 | ZCRMSNorm / RoPE / GQA / gate | ✅ partial (residual path only); full attn bw stretch |
+| M5 | Enc–dec + tied emb one step | ✅ integration test green |
+| M6 | Stream dataloader + ckpt | ✅ round-trip; no full-load assert |
+| M7 | Model A fixture smoke | ✅ 50 ep overfit synthetic id bins |
+| **M8** | **BPE + synth FC data pipeline** | **⏳ CURRENT** — vocab 512/8192; C loader; JSONL → NDSET001 |
+| **M9** | **Eval on real tool calls** | **⏳ CURRENT** — JSON parse + tool EM + full-call EM |
+| **M10** | **Model A retrain on FC bins** | **⏳ CURRENT** — `val_full_call_EM > 0` on real val |
+| **M11** | Model B pilot on FC | only after M10 keeps |
+| **M12** | **Live `generate(query, tools)` + playground wired** | **⏳ CURRENT** — playground POST must call live model, NEVER hardcoded reference |
 | M13 | Model C Termux path | ≥1 epoch no OOM or desktop-only note |
 | M14 | Weighted CE / z-loss hooks | CE default; tests for weights |
 | M15 | README comparison | wins/losses per model |
+
+### Current focus (post-fixture)
+
+Playground at `0.0.0.0:7860` currently prints a **hardcoded** Cactus reference
+JSON — that is fake. M8–M12 are the current critical path:
+
+```text
+M8  BPE + synth FC corpus → NDSET001 stream bins
+M9  eval JSON parse + tool-name EM + full-call EM (NOT just id token EM)
+M10 Model A retrain on real FC bins (vocab 512 smoke / 8192 target)
+M12 generate(query, tools) wired into playground — live, not stub
+```
+
+**Rule:** playground POST `/generate` returns model output. If the response is
+the same regardless of `query`/`tools`, the build is broken — fix the stub.
+
+GO before any B/C retrain, before any "experimentation loop" exercise:
+playground produces input-dependent JSON.
 
 Phases 0–8 map: oracle→M4/M9, tensor→M1, autograd→M2, attention→M4,
 enc-dec+KV→M5/M12, sanity→M7/M10, pilot→M11, full→M13–14, infer-opt→M12+.

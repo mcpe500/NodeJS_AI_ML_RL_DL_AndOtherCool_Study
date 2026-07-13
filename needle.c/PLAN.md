@@ -205,26 +205,26 @@ make eval
 
 ## 6. Milestones M0–M15 (one-liners)
 
-| # | Gate |
-|---|------|
-| M0 | docs + dirs; HW+TDD present |
-| M1 | test_tensor RED→GREEN |
-| M2 | autograd + RSS-flat |
-| M3 | Linear+AdamW+CE overfit 10 |
-| M4 | attention oracle parity |
-| M5 | enc–dec one train step |
-| M6 | stream loader + ckpt |
-| M7 | Model A smoke; RSS≤900 |
-| M8 | BPE + data bins |
-| M9 | eval fixtures green |
-| M10 | A baseline results.tsv |
-| M11 | B pilot baseline |
-| M12 | KV-cache JSON decode |
-| M13 | C Termux 1 epoch or desktop-only |
-| M14 | weighted CE hooks |
-| M15 | README comparison |
+| # | Gate | Status |
+|---|------|--------|
+| M0 | docs + dirs; HW+TDD present | ✅ |
+| M1 | test_tensor RED→GREEN | ✅ |
+| M2 | autograd + RSS-flat | ✅ |
+| M3 | Linear+AdamW+CE overfit 10 | ✅ |
+| M4 | attention oracle parity | ✅ partial (residual only) |
+| M5 | enc–dec one train step | ✅ |
+| M6 | stream loader + ckpt | ✅ |
+| M7 | Model A fixture smoke; RSS≤900 | ✅ |
+| **M8** | **BPE + FC data bins (vocab 512/8192)** | **⏳ CURRENT** |
+| **M9** | **eval JSON parse + tool EM + full-call EM** | **⏳ CURRENT** |
+| **M10** | **A retrain on FC bins, val_full_call_EM>0** | **⏳ CURRENT** |
+| M11 | B pilot on FC | after M10 |
+| **M12** | **live generate(query, tools) wired to playground** | **⏳ CURRENT** |
+| M13 | C Termux 1 epoch or desktop-only | later |
+| M14 | weighted CE hooks | stretch |
+| M15 | README comparison | end |
 
-**No advance if `make test` red.**
+**No advance if `make test` red. No playground merge if POST `/generate` returns input-independent JSON.**
 
 ## 7. Risks
 

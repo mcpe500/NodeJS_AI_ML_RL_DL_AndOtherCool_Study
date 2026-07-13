@@ -18,16 +18,26 @@ static void batch_to_tensors(nd_batch *b, int max_src, int max_tgt,
     }
 }
 
+/* argv: model{A|B|C} data_path ckpt_path [vocab_path] [merges_path] */
 int main(int argc, char **argv) {
     const char *which = argc > 1 ? argv[1] : "A";
     const char *data = argc > 2 ? argv[2] : "data/smoke.bin";
     const char *ckpt = argc > 3 ? argv[3] : "ckpts/model.nd";
+    const char *vocab = argc > 4 ? argv[4] : NULL;
+    const char *merges = argc > 5 ? argv[5] : NULL;
     nd_needle_config cfg;
     int batch = 4;
     if (which[0] == 'B' || which[0] == 'b') { cfg = nd_cfg_pilot(); batch = 1; }
     else if (which[0] == 'C' || which[0] == 'c') { cfg = nd_cfg_full(); batch = 1; }
     else { cfg = nd_cfg_sanity(); batch = 4; }
     cfg.vocab = 64;
+    if (vocab && merges) {
+        nd_bpe bpe;
+        if (nd_bpe_load(&bpe, vocab, merges) == 0) {
+            cfg.vocab = bpe.vocab_size;
+            printf("eval: vocab=%d from BPE\n", cfg.vocab);
+        }
+    }
     nd_dataset *ds = nd_dataset_open(data);
     if (!ds) { fprintf(stderr, "data open fail\n"); return 1; }
     nd_module *model = nd_needle_create(&cfg);

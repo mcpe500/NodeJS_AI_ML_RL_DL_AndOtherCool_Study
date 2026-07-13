@@ -2,16 +2,20 @@
 framework/libneedle.a
 framework/src/*.o
 **/train_bin
+**/fc_bin
 **/evaluate
 inference/generate
 inference/chat_demo
 inference/playground
 tools/write_smoke_bin
+tools/enc_debug
 tests/unit/test_*
 tests/integration/test_*
 tests/integration/dbg_*
+tools/__pycache__/
+**/__pycache__/
 
-# weights + logs (regenerate via make train)
+# weights + logs (regenerate via make train / make fc)
 **/*.nd
 **/ckpts/
 **/*.log
@@ -19,4 +23,7 @@ tests/integration/dbg_*
 
 # local data bins optional — keep schema; bins regenerable
 data/*.bin
+data/raw/
+data/raw_smoke/
+tokenizer/fc_corpus.txt
 !data/schema.md

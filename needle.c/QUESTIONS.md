@@ -201,3 +201,33 @@ Rules:
 Reasoning: user request — less bug-prone. Attention/RoPE/mask bugs are silent
 and expensive; tests are cheaper than 6M-param runs on a phone.
 See MASTER_PLAN §0.2, PLAN.md §0.2, program.txt (TDD + HW rules).
+
+---
+
+## Q14: BPE vocab size for Termux real-FC train (2026-07-14)
+
+Decision: **512 smoke / 8192 target**.
+
+* Smoke path (default Termux first pass): vocab=512, max_src/tgt=64–128,
+  Model A retrain, prove playground live.
+* Target path: vocab=8192 once smoke GO; same pipeline, larger emb table.
+
+Reasoning: tied emb size = V·d. At d=64, V=8192 → ~0.5M emb params alone —
+fine for A, but BPE train + larger CE head slower on phone. 512 proves the
+encode→train→generate path without waiting hours. Log which V was used in
+`results.tsv` description.
+
+---
+
+## Q15: Playground must never hardcode tool JSON (2026-07-14)
+
+Decision: **hardcoded reference JSON in playground is a bug**, not a feature.
+
+POST `/generate` must call `generate(query, tools)` on live weights. If two
+different queries produce byte-identical model output that matches a fixed
+template independent of input, treat as fail. Showing a Cactus *example* in
+docs is fine; injecting it as the response is not.
+
+Reasoning: user typed `hello` and got San Francisco weather — false demo.
+Trust requires input-dependent output even if underfit (garbled JSON OK;
+hardcoded SF not OK).

@@ -9,5 +9,6 @@
 #include "optim.h"
 #include "dataset.h"
 #include "io.h"
+#include "bpe.h"
 
 #endif

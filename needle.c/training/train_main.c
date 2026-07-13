@@ -67,6 +67,7 @@ static float train_epochs(nd_module *model, nd_optim *opt, nd_dataset *ds,
         printf("%s epoch=%d/%d loss=%.4f steps=%d peak_rss_mb=%.1f cur_rss_mb=%.1f\n",
                tag, ep + 1, epochs, steps ? ep_loss / steps : 0, steps,
                nd_peak_rss_mb(), nd_current_rss_mb());
+        fflush(stdout);
     }
     free(b.src_ids); free(b.tgt_ids); free(b.labels);
     free(b.src_lens); free(b.tgt_lens);
@@ -125,23 +126,27 @@ static void log_results(const char *path, const char *commit, float em, float rs
     fclose(fp);
 }
 
-/* argv: model{A|B|C} mode{smoke|train} data_path [ckpt_path] */
+/* argv: model{A|B|C} mode{smoke|train|fc} data_path [ckpt_path] [results.tsv] [vocab_path] [merges_path] */
 int main(int argc, char **argv) {
     const char *which = argc > 1 ? argv[1] : "A";
     const char *mode = argc > 2 ? argv[2] : "smoke";
     const char *data = argc > 3 ? argv[3] : "data/smoke.bin";
     const char *ckpt = argc > 4 ? argv[4] : "ckpts/model.nd";
     const char *results = argc > 5 ? argv[5] : "results.tsv";
+    const char *vocab_path = argc > 6 ? argv[6] : NULL;
+    const char *merges_path = argc > 7 ? argv[7] : NULL;
 
     nd_seed(42);
     nd_needle_config cfg;
     int epochs = 50, batch = 4, accum = 1;
     float lr = 1e-3f;
+    int is_fc = strcmp(mode, "fc") == 0;
     if (which[0] == 'A' || which[0] == 'a') {
         cfg = nd_cfg_sanity();
         cfg.vocab = 64;
-        epochs = strcmp(mode, "train") == 0 ? 20 : 50;
-        batch = 4; accum = 1; lr = 1e-3f;
+        cfg.max_len = 128; /* FC bins use max_src=128 */
+        if (is_fc) { epochs = 20; batch = 4; accum = 1; lr = 1e-3f; }
+        else { epochs = strcmp(mode, "train") == 0 ? 20 : 50; batch = 4; accum = 1; lr = 1e-3f; }
     } else if (which[0] == 'B' || which[0] == 'b') {
         cfg = nd_cfg_pilot();
         cfg.vocab = 64; /* fixture vocab; real BPE later */
@@ -154,6 +159,18 @@ int main(int argc, char **argv) {
         batch = 1; accum = 4; lr = 3e-4f; /* grad accum for C */
     }
 
+    /* FC mode: load BPE, override vocab + max_len from data bin */
+    if (is_fc && vocab_path && merges_path) {
+        nd_bpe bpe;
+        if (nd_bpe_load(&bpe, vocab_path, merges_path) != 0) {
+            fprintf(stderr, "BPE load fail %s\n", vocab_path);
+            return 1;
+        }
+        cfg.vocab = bpe.vocab_size;
+        printf("fc: vocab=%d from %s\n", bpe.vocab_size, vocab_path);
+        fflush(stdout);
+    }
+
     nd_dataset *ds = nd_dataset_open(data);
     if (!ds) { fprintf(stderr, "open fail %s\n", data); return 1; }
     nd_module *model = nd_needle_create(&cfg);
@@ -161,6 +178,7 @@ int main(int argc, char **argv) {
     long np = nd_module_num_params(model);
     printf("model=%s mode=%s n_params=%ld vocab=%d d=%d B=%d accum=%d epochs=%d\n",
            which, mode, np, cfg.vocab, cfg.d_model, batch, accum, epochs);
+    fflush(stdout);
     nd_tensor **params; int n;
     nd_module_parameters(model, &params, &n);
     nd_optim *opt = nd_adamw(params, n, lr, 0.9f, 0.999f, 0.01f, 1e-8f);

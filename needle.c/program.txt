@@ -50,10 +50,12 @@ Each experiment targets **one of the three models** and runs on CPU only. Each m
 **What you CAN do:**
 - Modify `models/<model>/src/*` — model architecture knobs (within HW caps), hyperparameters (lr, batch within caps, epochs, loss flags), training loop, weight init, CLI args. Everything about that one model is fair game.
 - Modify `models/<model>/Makefile` (build flags, train target args).
+- Add BPE tokenizer + synth FC data scripts under `tokenizer/`, `data/synth/`, `tools/` (M8 — required for real I/O).
+- Wire `generate(query, tools)` into `inference/playground.c` so POST `/generate` calls live model.
 
 **What you CANNOT do:**
-- Modify `framework/` or `kernels/`. They are read-only once built green. They contain the fixed framework: tensor ops, autograd, nn modules, optimizers, stream dataloader, weight I/O.
-- Modify `data/` artifacts. The dataset is the ground truth for evaluation.
+- Modify `framework/` or `kernels/` EXCEPT adding `framework/src/bpe.c` + `include/bpe.h` for M8 (TDD with `tests/unit/test_bpe.c`).
+- Modify `data/` artifacts (bins). The dataset is the ground truth for evaluation.
 - Modify `eval/`. The metrics harness is fixed.
 - Weaken or delete asserts in `tests/` to force a green build.
 - Install new packages or add C dependencies. Framework stays pure C11 with no external libs for v1.
@@ -61,8 +63,11 @@ Each experiment targets **one of the three models** and runs on CPU only. Each m
 - Full-load the dataset into RAM (stream only).
 - Train on the held-out test split. Test/held-out is touched only by `eval/`.
 - Raise peak process RSS above **900 MB** by design.
+- **Hardcode tool-call JSON in `inference/playground.c` POST `/generate`.** Playground must call `generate(query, tools)` on live weights. Output that doesn't depend on input = broken build.
 
 **The goal is simple: get the highest val_full_call_EM for each model.** (Full function-call exact match is the headline metric. val_tool_name_EM, arg-value EM, JSON parse rate are reported but secondary.) Everything else is fair game within the constraints: architecture knobs, hyperparameters, loss stage (after CE baseline), init, batch size within caps. The only hard constraints are: code compiles, tests stay green, run does not crash, peak RSS ≤ 900 MB, finishes within the per-model time budget.
+
+**Current focus (post M0–M7 fixture-done):** close M8 → M12 so playground returns live model output. Until `query`/`tools` actually change the response, the stack is not done — even if `val_full_call_EM` on fixture bins looks fine. Synthetic-token training (vocab=64) is a smoke proof, not the product.
 
 **RAM is a HARD constraint (hardware-aware).** Measured MemAvailable ≈ 1.0–1.6 GB (often ~1.0 GB). Peak process RSS must stay ≤ **900 MB**. Full float32 + full epochs are required — never drop precision or cut epoch count for RAM. Allowed RAM levers only: stream dataset (never full-load corpus), free autograd graph every step, lower batch (A≤8/def4, B≤2/def1, C=1), activation checkpointing + grad accum on Model C, shorter seq only within that model tier's config. On OOM: log crash, halve batch once, retry; if still OOM → permanent `crash` row and move on. Longer wall-clock is fine if it avoids crashes; still keep runs optimized (do not make them needlessly long). See PLAN.md §0.1.
 

@@ -1,0 +1,12 @@
+[
+  {"name": "get_weather", "parameters": {"location": "string"}},
+  {"name": "create_alarm", "parameters": {"time": "string"}},
+  {"name": "web_search", "parameters": {"q": "string"}},
+  {"name": "set_light", "parameters": {"room": "string", "on": "boolean"}},
+  {"name": "send_email", "parameters": {"to": "string", "subject": "string"}},
+  {"name": "play_music", "parameters": {"song": "string"}},
+  {"name": "get_time", "parameters": {}},
+  {"name": "translate", "parameters": {"text": "string", "lang": "string"}},
+  {"name": "set_timer", "parameters": {"minutes": "number"}},
+  {"name": "open_app", "parameters": {"app": "string"}}
+]

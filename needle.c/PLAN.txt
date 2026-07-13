@@ -276,3 +276,28 @@ loss schedule, headline metric, no-FFN). Append new Qs; do not stall the loop.
 | QUESTIONS.md | Append-only ADR |
 
 When docs disagree, MASTER_PLAN wins; then fix the others.
+
+---
+
+## Update 2026-07-14: the stub must die
+
+M0–M7 shipped on `needle.c/jul14`: framework + tests green, A/B/C full-epoch
+trained on **synthetic token-id fixtures** (vocab=64, arithmetic sequences).
+That proves the stack runs end-to-end — it is **not** the product.
+
+The playground at `0.0.0.0:7860` accepts `query` + `tools`, then prints a
+**hardcoded** Cactus-style reference JSON regardless of input. A user typing
+`hello` gets "San Francisco weather". That is fake.
+
+Current critical path (M8→M12):
+
+1. **BPE** — Python trains 512 (smoke) / 8192 (target); C loads + encodes.
+2. **Synth FC corpus** — 2–5k JSONL rows; templates + distractors + no-tool.
+3. **Retrain Model A** on real bins (vocab from BPE, not 64).
+4. **`generate(query, tools)`** — encode → greedy decode → detok. Wire to
+   playground POST. Output must change with input.
+5. **Eval** on real JSON calls: parse rate, tool-name EM, **full-call EM**.
+
+Until those land, `val_full_call_EM` on fixture bins is a smoke number, not
+a product number. The loop in `program.txt` is paused at M7 until playground
+goes live.

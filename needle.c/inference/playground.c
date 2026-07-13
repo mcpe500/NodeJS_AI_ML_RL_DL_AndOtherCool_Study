@@ -1,7 +1,9 @@
-/* Minimal playground HTTP server — bind 0.0.0.0 (Termux-friendly).
- * Text→tool path not ready; UI still runnable for contract demo.
- * Usage: ./inference/playground [port]   default 7860
+/* Playground HTTP server — bind 0.0.0.0 (Termux-friendly).
+ * Live path: encode(query+tools) → greedy decode → detok JSON.
+ * Usage: ./inference/playground [port] [ckpt] [vocab] [merges]
+ *   defaults: 7860, models/01-sanity/ckpts/sanity_fc.nd, tokenizer/vocab+merges
  */
+#include "needle.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -14,6 +16,12 @@
 #define HOST "0.0.0.0"
 #define DEF_PORT 7860
 #define BUF 65536
+#define MAX_SRC 128
+#define MAX_TGT 64
+
+static nd_module *g_model;
+static nd_bpe g_bpe;
+static int g_ready;
 
 static const char *PAGE =
 "<!DOCTYPE html><html><head><meta charset=utf-8>"
@@ -28,9 +36,7 @@ static const char *PAGE =
 ".warn{color:#fdd663;font-size:.9rem} .ok{color:#81c995} a{color:#8ab4f8}"
 "</style></head><body>"
 "<h1>needle.c playground</h1>"
-"<p class=warn>Text→tool-call path is <b>NOT READY</b> yet (no BPE / FC weights). "
-"This UI mirrors <a href=\"https://cactuscompute.com/blog/needle\">Cactus Needle</a> I/O shape so you can try the form; "
-"output is a stub + reference, not a live model call.</p>"
+"<p class=ok>Live model path: encode → greedy → detok. Output is model string (may underfit).</p>"
 "<form method=POST action=/generate>"
 "<label>query</label>"
 "<textarea name=query>What's the weather in San Francisco?</textarea>"
@@ -39,7 +45,7 @@ static const char *PAGE =
 "<button type=submit>Generate</button>"
 "</form>"
 "<p style=margin-top:2rem;font-size:.85rem;color:#9aa0a6>"
-"Bind: 0.0.0.0 · Dev checks: <code>make -C tests</code> · <code>make smoke MODEL=01-sanity</code> · <code>make infer</code>"
+"Bind: 0.0.0.0 · <code>make fc</code> then <code>make playground</code>"
 "</p></body></html>";
 
 static void url_decode(char *s) {
@@ -55,7 +61,6 @@ static void url_decode(char *s) {
     *o = 0;
 }
 
-/* extract application/x-www-form-urlencoded field */
 static int form_get(const char *body, const char *key, char *out, size_t outn) {
     size_t klen = strlen(key);
     const char *p = body;
@@ -94,6 +99,53 @@ static void respond(int fd, int code, const char *ctype, const char *body) {
     send_all(fd, body, blen);
 }
 
+/* Greedy generate into out (size outn). Returns 0 ok. */
+static int live_generate(const char *query, const char *tools, char *out, size_t outn) {
+    if (!g_ready || !g_model) {
+        snprintf(out, outn, "[]");
+        return -1;
+    }
+    char src_text[4096];
+    snprintf(src_text, sizeof src_text, "Query: %s\nTools: %s", query, tools);
+    int src_ids[MAX_SRC];
+    int ns = nd_bpe_encode(&g_bpe, src_text, src_ids, MAX_SRC, 1);
+    if (ns <= 0) { snprintf(out, outn, "[]"); return -1; }
+
+    int src_pad[MAX_SRC];
+    for (int i = 0; i < MAX_SRC; ++i)
+        src_pad[i] = i < ns ? src_ids[i] : g_bpe.pad_id;
+
+    int tgt_ids[MAX_TGT];
+    int nt = 1;
+    tgt_ids[0] = g_bpe.bos_id;
+
+    for (int step = 0; step < MAX_TGT - 1 && nt < MAX_TGT; ++step) {
+        int tgt_pad[MAX_TGT];
+        for (int i = 0; i < MAX_TGT; ++i)
+            tgt_pad[i] = i < nt ? tgt_ids[i] : g_bpe.pad_id;
+
+        int ssh[2] = {1, MAX_SRC}, tsh[2] = {1, MAX_TGT};
+        nd_tensor *src = nd_zeros(ssh, 2, false);
+        nd_tensor *tgt = nd_zeros(tsh, 2, false);
+        for (int i = 0; i < MAX_SRC; ++i) src->data[i] = (float)src_pad[i];
+        for (int i = 0; i < MAX_TGT; ++i) tgt->data[i] = (float)tgt_pad[i];
+
+        nd_tensor *logits = g_model->forward2(g_model, src, tgt);
+        int V = logits->shape[2];
+        int last = nt - 1;
+        float *row = logits->data + last * V;
+        int best = 0; float bv = row[0];
+        for (int v = 1; v < V; ++v) if (row[v] > bv) { bv = row[v]; best = v; }
+        nd_tensor_free(logits);
+        nd_tensor_free(src); nd_tensor_free(tgt);
+
+        if (best == g_bpe.eos_id) break;
+        tgt_ids[nt++] = best;
+    }
+    nd_bpe_decode(&g_bpe, tgt_ids + 1, nt - 1, out, (int)outn);
+    return 0;
+}
+
 static void handle(int cfd) {
     char req[BUF];
     ssize_t n = read(cfd, req, sizeof req - 1);
@@ -110,12 +162,14 @@ static void handle(int cfd) {
         char *body = strstr(req, "\r\n\r\n");
         if (!body) { respond(cfd, 400, "text/plain", "no body"); close(cfd); return; }
         body += 4;
-        char query[4096], tools[8192], html[16384];
+        char query[4096], tools[8192], model_out[4096], html[16384];
         form_get(body, "query", query, sizeof query);
         form_get(body, "tools", tools, sizeof tools);
-        /* escape-ish for HTML: strip < */
         for (char *p = query; *p; ++p) if (*p == '<') *p = '[';
         for (char *p = tools; *p; ++p) if (*p == '<') *p = '[';
+
+        live_generate(query, tools[0] ? tools : "[]", model_out, sizeof model_out);
+        for (char *p = model_out; *p; ++p) if (*p == '<') *p = '[';
 
         snprintf(html, sizeof html,
             "<!DOCTYPE html><html><head><meta charset=utf-8>"
@@ -123,19 +177,18 @@ static void handle(int cfd) {
             "<title>result — needle.c</title>"
             "<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:1.5rem auto;padding:0 1rem;"
             "background:#0f1115;color:#e8eaed} pre{background:#1a1d24;border:1px solid #333;border-radius:8px;"
-            "padding:1rem;white-space:pre-wrap;word-break:break-word} .warn{color:#fdd663} a{color:#8ab4f8}</style>"
+            "padding:1rem;white-space:pre-wrap;word-break:break-word} .ok{color:#81c995} a{color:#8ab4f8}</style>"
             "</head><body><h1>result</h1>"
-            "<p class=warn>Model text path not wired — stub + Cactus reference only.</p>"
+            "<p class=ok>Live model output (greedy, no hardcode).</p>"
             "<h3>INPUT query</h3><pre>%s</pre>"
             "<h3>INPUT tools</h3><pre>%s</pre>"
-            "<h3>OUTPUT (not generated by needle.c weights)</h3>"
-            "<pre>[{\"name\":\"get_weather\",\"arguments\":{\"location\":\"San Francisco\"}}]</pre>"
-            "<p>Why: no BPE, no function-calling train data, no generate(query,tools). "
-            "Weights here are synthetic token-id fixtures only.</p>"
-            "<p><a href=/>← back</a> · dev: <code>make -C tests</code> · <code>make infer</code></p>"
+            "<h3>OUTPUT (model)</h3>"
+            "<pre>%s</pre>"
+            "<p><a href=/>← back</a></p>"
             "</body></html>",
             query[0] ? query : "(empty)",
-            tools[0] ? tools : "(empty)");
+            tools[0] ? tools : "(empty)",
+            model_out[0] ? model_out : "(empty model string)");
         respond(cfd, 200, "text/html; charset=utf-8", html);
         close(cfd);
         return;
@@ -147,8 +200,31 @@ static void handle(int cfd) {
 
 int main(int argc, char **argv) {
     int port = DEF_PORT;
+    const char *ckpt = "models/01-sanity/ckpts/sanity_fc.nd";
+    const char *vocab = "tokenizer/vocab.json";
+    const char *merges = "tokenizer/merges.txt";
     if (argc > 1) port = atoi(argv[1]);
+    if (argc > 2) ckpt = argv[2];
+    if (argc > 3) vocab = argv[3];
+    if (argc > 4) merges = argv[4];
     if (port <= 0 || port > 65535) port = DEF_PORT;
+
+    g_ready = 0;
+    if (nd_bpe_load(&g_bpe, vocab, merges) != 0) {
+        fprintf(stderr, "warn: BPE load fail %s — generate returns []\n", vocab);
+    } else {
+        nd_seed(1);
+        nd_needle_config cfg = nd_cfg_sanity();
+        cfg.vocab = g_bpe.vocab_size;
+        cfg.max_len = MAX_SRC;
+        g_model = nd_needle_create(&cfg);
+        if (nd_checkpoint_load(ckpt, g_model) != 0) {
+            fprintf(stderr, "warn: ckpt load fail %s — random weights\n", ckpt);
+        } else {
+            g_ready = 1;
+            printf("loaded ckpt %s vocab=%d\n", ckpt, g_bpe.vocab_size);
+        }
+    }
 
     int sfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sfd < 0) { perror("socket"); return 1; }
@@ -159,7 +235,7 @@ int main(int argc, char **argv) {
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
     addr.sin_port = htons((uint16_t)port);
-    addr.sin_addr.s_addr = inet_addr(HOST); /* 0.0.0.0 */
+    addr.sin_addr.s_addr = inet_addr(HOST);
 
     if (bind(sfd, (struct sockaddr *)&addr, sizeof addr) < 0) {
         perror("bind");
@@ -170,8 +246,8 @@ int main(int argc, char **argv) {
 
     printf("needle.c playground\n");
     printf("  listen %s:%d\n", HOST, port);
-    printf("  open   http://127.0.0.1:%d/   (or phone IP:%d on LAN)\n", port, port);
-    printf("  status TEXT→TOOL not ready (UI stub + reference I/O)\n");
+    printf("  open   http://127.0.0.1:%d/\n", port);
+    printf("  status %s\n", g_ready ? "LIVE generate()" : "no ckpt — empty output");
     printf("  stop   Ctrl+C\n");
     fflush(stdout);
 
@@ -187,5 +263,6 @@ int main(int argc, char **argv) {
         handle(cfd);
     }
     close(sfd);
+    if (g_model) nd_module_free(g_model);
     return 0;
 }
