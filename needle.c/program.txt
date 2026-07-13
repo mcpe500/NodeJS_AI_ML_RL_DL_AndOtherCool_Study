@@ -1,0 +1,163 @@
+# needle.c
+
+This is an experiment to build a PyTorch-like neural-network framework in C11
+("nd_*") and use it to train three sizes of an attention-only encoder-decoder
+tool-calling model (Needle-style: no FFN). The headline metric is
+val_full_call_EM (full function-call exact match on held-out; higher is better).
+
+
+## HARDWARE AWARE (HARD — never violate)
+
+Measured host (Termux aarch64, 2026-07-14): MemAvailable ~1.0–1.6 GB under load
+(often ~1.0 GB). Peak process RSS must stay ≤ **900 MB**.
+
+Full float32 + full epoch counts are **required**. Never drop precision or cut
+epochs to save RAM. RAM safety is only via:
+
+- **stream / chunk dataset** (header + indices; fseek/fread per batch — never
+  malloc the whole corpus into RAM)
+- free autograd graph every optimizer step
+- batch caps (A≤8/def4, B≤2/def1, C=1)
+- activation checkpointing + grad accum on Model C
+- shorter seq only within that model tier
+
+On OOM: log, halve batch once, retry; still OOM → permanent `crash`.
+Longer wall-clock is fine if it avoids crashes; still keep runs optimized
+(do not make them needlessly long). Details: PLAN.md §0.1, QUESTIONS.md Q0.
+
+## Setup
+
+To set up a new run, work with the user to:
+
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `jul14`). The branch `needle.c/<tag>` must not already exist — this is a fresh run.
+2. **Create the branch**: `git checkout -b needle.c/<tag>` from current main.
+3. **Read the in-scope files**: The repo is small. Read these files for full context:
+   - `program.txt` — this file. Workflow, rules, loop.
+   - `PLAN.md` — architecture, dataset, framework API, HW caps, TDD, milestones.
+   - `README.md` — repository context.
+4. **Verify dependencies**: Check that the Termux environment has `clang`/`gcc`, `make`, and `python3`. If not, tell the human to run `pkg install clang make python`.
+5. **Build the framework + tests**: Run `make -C framework && make -C tests`. All tests must pass green. If any test fails, stop and tell the human — the framework is the foundation and bugs here invalidate every experiment. TDD: do not advance without green tests.
+6. **Verify data exists**: Check that streamed dataset bins under `data/` exist when training beyond smoke. If not, tell the human how to build them (synth scripts). Smoke overfit may use a tiny fixture.
+7. **Initialize results.tsv**: Create `results.tsv` per model folder with just the header row. The baseline will be recorded after the first run.
+8. **Confirm and go**: Confirm setup looks good.
+
+Once you get confirmation, kick off the experimentation.
+
+## Experimentation
+
+Each experiment targets **one of the three models** and runs on CPU only. Each model has its own time budget — see `PLAN.md` for expected wall-clock.
+
+**What you CAN do:**
+- Modify `models/<model>/src/*` — model architecture knobs (within HW caps), hyperparameters (lr, batch within caps, epochs, loss flags), training loop, weight init, CLI args. Everything about that one model is fair game.
+- Modify `models/<model>/Makefile` (build flags, train target args).
+
+**What you CANNOT do:**
+- Modify `framework/` or `kernels/`. They are read-only once built green. They contain the fixed framework: tensor ops, autograd, nn modules, optimizers, stream dataloader, weight I/O.
+- Modify `data/` artifacts. The dataset is the ground truth for evaluation.
+- Modify `eval/`. The metrics harness is fixed.
+- Weaken or delete asserts in `tests/` to force a green build.
+- Install new packages or add C dependencies. Framework stays pure C11 with no external libs for v1.
+- Drop float32 precision or cut epoch count to "save RAM".
+- Full-load the dataset into RAM (stream only).
+- Train on the held-out test split. Test/held-out is touched only by `eval/`.
+- Raise peak process RSS above **900 MB** by design.
+
+**The goal is simple: get the highest val_full_call_EM for each model.** (Full function-call exact match is the headline metric. val_tool_name_EM, arg-value EM, JSON parse rate are reported but secondary.) Everything else is fair game within the constraints: architecture knobs, hyperparameters, loss stage (after CE baseline), init, batch size within caps. The only hard constraints are: code compiles, tests stay green, run does not crash, peak RSS ≤ 900 MB, finishes within the per-model time budget.
+
+**RAM is a HARD constraint (hardware-aware).** Measured MemAvailable ≈ 1.0–1.6 GB (often ~1.0 GB). Peak process RSS must stay ≤ **900 MB**. Full float32 + full epochs are required — never drop precision or cut epoch count for RAM. Allowed RAM levers only: stream dataset (never full-load corpus), free autograd graph every step, lower batch (A≤8/def4, B≤2/def1, C=1), activation checkpointing + grad accum on Model C, shorter seq only within that model tier's config. On OOM: log crash, halve batch once, retry; if still OOM → permanent `crash` row and move on. Longer wall-clock is fine if it avoids crashes; still keep runs optimized (do not make them needlessly long). See PLAN.md §0.1.
+
+**TDD:** Framework work is test-first (RED→GREEN). After framework freeze, do not break `make -C tests`. Smoke (`make smoke MODEL=…`) is GO/NO-GO before expensive Pilot/Full runs. Never weaken tests to pass.
+
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A tiny EM gain that adds 200 lines of hacky code? Probably not worth it. A tiny EM gain from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+
+**The first run per model**: Your very first run on each model should always be to establish the baseline, so you will run the training script as-is (the default architecture and hyperparameters documented in that model's README). Only after the baseline is logged do you start experimenting.
+
+## Output format
+
+Once the training script finishes it prints a summary like this:
+
+```
+---
+model:                01-sanity
+epochs:               20
+final_train_loss:     0.0421
+final_val_loss:       0.0612
+val_full_call_EM:     0.720000
+val_tool_name_EM:     0.880000
+val_arg_value_EM:     0.650000
+json_parse_rate:      0.950000
+n_params:             107000
+peak_rss_mb:          48.2
+train_seconds:        47.3
+seed:                 0x9ac4f1e2
+```
+
+Note that the script's wall-clock depends on the model and on this phone's CPU, so numbers will vary. You can extract the headline metric from the log file:
+
+```
+grep "^val_full_call_EM:\|^peak_rss_mb:" run.log
+```
+
+If `peak_rss_mb` is missing or greater than 900, treat the run as a failure.
+
+## Logging results
+
+When an experiment is done, log it to `results.tsv` inside the model's own folder (tab-separated, NOT comma-separated — commas break in descriptions).
+
+The TSV has a header row and 5 columns:
+
+```
+commit    val_full_call_EM    peak_rss_mb    status    description
+```
+
+1. git commit hash (short, 7 chars)
+2. val_full_call_EM achieved (e.g. 0.720000) — use 0.000000 for crashes
+3. peak_rss_mb (e.g. 48.2) — use 0.0 for crashes
+4. status: `keep`, `discard`, or `crash`
+5. short text description of what this experiment tried
+
+Example:
+
+```
+commit    val_full_call_EM    peak_rss_mb    status    description
+a1b2c3d    0.720000    48.2    keep    baseline
+b2c3d4e    0.750000    49.0    keep    increase LR to 3e-4
+c3d4e5f    0.700000    48.5    discard    switch gate init
+d4e5f6g    0.000000    0.0    crash    batch 8 OOM
+```
+
+A separate `results.tsv` lives inside each of `models/01-sanity/`, `models/02-pilot-6m/`, `models/03-full-26m/`. Do not mix them.
+
+## The experiment loop
+
+The experiment runs on a dedicated branch (e.g. `needle.c/jul14`).
+
+Each model is its own experiment stream. You can either finish one model before starting the next, or interleave — but log each result to that model's `results.tsv`. Prefer the ladder: sanity → pilot → full.
+
+LOOP FOREVER:
+
+1. Look at the git state: the current branch/commit we're on, and which model is "in focus" (the last one you trained).
+2. Pick ONE model and ONE experimental idea for it. Read `PLAN.md` and that model's `README.md` and `results.tsv` for inspiration.
+3. Modify `models/<model>/src/*` and/or `models/<model>/Makefile` to implement the idea.
+4. git commit on the branch.
+5. Run the experiment: `make train MODEL=<model> > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context).
+6. Read out the results: `grep "^val_full_call_EM:\|^peak_rss_mb:" run.log`
+7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the error and attempt a fix. If you can't get things to work after more than a few attempts, give up.
+8. Record the results in the model's `results.tsv` (NOTE: do not commit the `results.tsv` file, leave it untracked by git).
+9. If `val_full_call_EM` improved (higher) **and** `peak_rss_mb` ≤ 900, you "advance" the branch — keep the git commit.
+10. If `val_full_call_EM` is equal or worse, or RSS > 900, you `git reset --hard HEAD~1` back to where you started.
+
+The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck on one model, switch to another model and try ideas there. Rewinds are allowed but should be very rare.
+
+**Timeout**: Each experiment should respect the per-model time budget in `PLAN.md`. If a run exceeds 2× the budget, kill it and treat it as a failure (discard and revert). Longer is fine when needed for full epochs without crashing — but do not make runs needlessly long.
+
+**Crashes**: If a run crashes (OOM, a bug, etc.), use your judgment:
+- Dumb/easy (typo, missing init, shape off-by-one, graph not freed) → fix + re-run.
+- OOM → first apply adaptive batch (halve, floor 1) and confirm dataset is streaming and graph is freed every step. If still OOM after one retry, log `crash` and abandon that idea.
+- Architecture fundamentally too large for 900 MB peak → log `crash`, do not thrash. Prefer Termux configs (C: B=1 + activation checkpoint + grad accum).
+
+**Cross-model comparison**: Once you have baselines on each model (and some keeps), update per-model README wins/losses and the top-level comparison notes.
+
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas on one model, switch to another. If you run out of ideas on all three, think harder — re-read `PLAN.md` for new angles, try combining previous near-misses, try more radical architectural changes (still attention-only, still under 900 MB). The loop runs until the human interrupts you, period.
+
+As an example use case, a user might leave you running while they sleep. Each sanity experiment may take minutes; pilot longer; full longest. Over an 8-hour sleep you can run many experiments across the three models. The user then wakes up to a fully populated `results.tsv` per model, comparison notes, and trained checkpoints — all completed while they slept.

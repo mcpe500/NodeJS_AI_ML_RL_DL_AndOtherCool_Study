@@ -1,0 +1,22 @@
+# build
+framework/libneedle.a
+framework/src/*.o
+**/train_bin
+**/evaluate
+inference/generate
+inference/chat_demo
+inference/playground
+tools/write_smoke_bin
+tests/unit/test_*
+tests/integration/test_*
+tests/integration/dbg_*
+
+# weights + logs (regenerate via make train)
+**/*.nd
+**/ckpts/
+**/*.log
+**/results.tsv
+
+# local data bins optional — keep schema; bins regenerable
+data/*.bin
+!data/schema.md

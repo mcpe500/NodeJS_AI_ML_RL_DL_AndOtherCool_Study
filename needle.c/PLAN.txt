@@ -1,0 +1,278 @@
+# needle.c — Implementation Plan (verbose genesis)
+
+## Context
+
+The user is studying ML/DL and wants a project that combines two goals:
+
+1. Build a **PyTorch-like deep-learning framework in C11** (fast systems code,
+   ergonomic `nd_*` API).
+2. Build a **Needle-style attention-only tool-calling model** on top of that
+   framework: encoder–decoder, **no FFN**, RoPE, ZCRMSNorm, gated residual,
+   GQA, tied embeddings, BPE 8192, JSON function-call output.
+
+Needle upstream trains in Python/JAX; Cactus is a separate C/C++ inference
+engine. This project is **not** a line-by-line Python port. It is:
+
+```text
+Python/JAX reference ──parity tests──> C training framework
+                                            │
+                                            ▼
+                                    Attention-only model
+                                            │
+                                            ▼
+                                CPU runtime (Termux first)
+```
+
+Repo is greenfield under `needle.c/`. Sibling project `token-predictor/`
+already proved the doc stack (MASTER_PLAN / PLAN / program / QUESTIONS) and
+the hardware-aware streaming lesson on the same phone.
+
+**HARDWARE AWARE (HARD):** Measured MemAvailable ~1.0–1.6 GB (often ~1.0 GB).
+Peak RSS ≤ **900 MB**. Stream dataset rows (never full-load). Free autograd
+graph every step. Model C: B=1 + activation checkpoint + grad accum.
+Full float32 + full epochs required — only load/activation strategy absorbs
+RAM pressure. See PLAN.md §0.1 / MASTER_PLAN §0.1 / QUESTIONS.md Q0.
+
+**TDD (HARD):** Test-Driven Development is mandatory. Write the failing test
+first (unit, numerical grad, oracle parity, smoke, integration), implement
+until green, then refactor. No feature without a test. Never weaken asserts
+to pass. `make test` red blocks milestones and experiment `keep`s.
+See MASTER_PLAN §0.2 / PLAN.md §0.2 / program.txt (TDD + HW rules).
+
+---
+
+## Hardware reality (override of "x86 + CUDA first")
+
+Original design notes assumed desktop x86-64 and a CUDA path. This device is:
+
+* Termux Android aarch64 (Qualcomm SM8350 / Venus)
+* 8 cores, **no GPU**
+* MemTotal ~7.1 GB but MemAvailable under load ~1.0–1.6 GB
+* Swap 4 GB, often half used
+
+Therefore:
+
+* **First platform:** Termux aarch64 CPU
+* **First precision:** FP32
+* **First backend:** simple C reference loops, single-thread
+* **Build:** Makefile first (CMake stretch)
+* **CUDA / BF16 / Muon / INT4 QAT:** desktop or late stretch only
+
+Longer wall-clock is acceptable if it avoids crashes (user: longer is fine
+as long as it will not crash). Still optimize via stream/chunk loads, free
+graph, activation checkpoint on Model C — do not make runs needlessly long.
+Never drop full float32 or full epochs for RAM; only chunk the *data load* and
+activation strategy.
+
+---
+
+## Project Structure
+
+```
+needle.c/
+├── README.md
+├── MASTER_PLAN.md          # definitive SoT
+├── PLAN.md                 # condensed loop reference
+├── PLAN.txt                # this narrative
+├── program.txt              # agent ops loop
+├── QUESTIONS.md            # ADR log
+├── Makefile
+├── framework/              # nd_* tensor, autograd, nn, optim, dataset, io
+├── kernels/                # cpu_ref first; neon/cuda stretch
+├── tests/                  # TDD: unit, numerical, smoke, integration
+├── models/
+│   ├── 01-sanity/          # <1M overfit
+│   ├── 02-pilot-6m/        # first real function-calling
+│   └── 03-full-26m/        # full 26M (Termux tight)
+├── tokenizer/              # BPE 8192
+├── training/
+├── inference/              # KV cache, generate, JSON
+├── tools/                  # oracle, convert, bench
+├── data/                   # synth scripts + stream bins
+├── eval/                   # fixed metrics harness
+└── scripts/
+```
+
+Freeze once green: `framework/`, `kernels/`, `eval/`, built `data/`.
+Editable in experiment loop: `models/*/` only. Tests expand, never weaken.
+
+---
+
+## Framework design story
+
+PyTorch feels good because of Tensor + autograd + Module + Optimizer + device
+abstraction. We expose the same ideas as C functions/structs:
+
+```text
+torch.Tensor          nd_tensor
+torch.nn.Module       nd_module
+loss.backward()       nd_backward(loss)
+optimizer.step()      nd_optim_step(opt)
+state_dict            nd_checkpoint_save/load
+```
+
+Execution strategy: **eager API + optional captured graph**. Users write eager
+code; for training we can record once and replay to avoid rebuild/alloc churn.
+
+Why pure C11: portable to Termux, no C++ ABI pain, study-friendly, matches
+token-predictor cTorch experience but with a cleaner `nd_*` prefix and
+attention-first ops.
+
+TDD entry: `test_tensor` before tensor ops, `test_autograd` + finite-diff
+before claiming backward works, RSS-flat test before multi-epoch train.
+
+---
+
+## Attention block narrative
+
+Needle's Simple Attention Network drops the FFN and bets on depth + attention
+mixing. Layers are:
+
+```text
+x → ZCRMSNorm → GQA (RoPE) → gated residual add → x'
+```
+
+```text
+ZCRMSNorm: y = x * (1+gamma) / sqrt(mean(x²)+eps)
+Gated:     y = x + sigmoid(gate) * attn(norm(x))
+```
+
+Encoder: bidirectional GQA. Decoder: causal self-attn + cross-attn.
+Tied embedding for input/output. Gate/gamma init near identity path so early
+training is stable (QUESTIONS Q8/Q9/Q12).
+
+Without oracle parity tests, a silent RoPE or mask bug will waste every later
+GPU-hour (or phone-hour). Hence Phase 0 / M4 before stacking 12+8 layers.
+
+---
+
+## Dataset / oracle story
+
+Python is **not** the runtime. It is used for:
+
+* golden activation dumps (oracle parity)
+* dataset synthesis / BPE training
+* weight conversion if comparing to upstream
+
+Function-calling examples must include distractors, no-tool, copy-heavy args,
+ID/EN mix, template-held-out splits. C training only sees streamed binary
+token ids + masks + labels.
+
+---
+
+## Three models ladder
+
+| Tier | Dir | Role |
+|------|-----|------|
+| A Sanity | `models/01-sanity` | Prove forward/backward; overfit 32–128 examples |
+| B Pilot | `models/02-pilot-6m` | First real multi-tool function calling |
+| C Full | `models/03-full-26m` | Full arch ~26M; Termux needs act-ckpt |
+
+Do **not** start at 26M or multi-billion-token pretrain. Safe path:
+
+```text
+1. TDD tensor + autograd
+2. TDD attention parity
+3. Sanity overfit
+4. Pilot 6M
+5. Eval no-FFN (default) solidly
+6. Full 26M with HW policy
+7. Only then BF16/Muon/QAT (desktop)
+```
+
+---
+
+## Build system
+
+Makefile first: simple on Termux, matches sibling project.
+
+```text
+make -C framework
+make -C tests     # GREEN required
+make smoke MODEL=01-sanity
+make train MODEL=01-sanity
+make eval
+```
+
+CMake multi-backend is stretch for desktop.
+
+---
+
+## Implementation order (phases → milestones)
+
+| Phase | Content | Milestone |
+|-------|---------|-----------|
+| 0 | Oracle goldens | M4/M9 |
+| 1 | Tensor core (TDD) | M1 |
+| 2 | Autograd min (TDD) | M2 |
+| 3 | Attention block (TDD parity) | M4 |
+| 4 | Enc–dec + KV | M5/M12 |
+| 5 | Sanity train | M7/M10 |
+| 6 | Pilot 6M | M11 |
+| 7 | Full 26M + late losses | M13–M14 |
+| 8 | Infer optimize | M12+ stretch |
+
+M0 is docs (this stack). Full M0–M15 table lives in MASTER_PLAN / PLAN.md.
+
+**Rule:** no phase advances while `make test` is red.
+
+---
+
+## Risks & tradeoffs
+
+| Risk | Why it hurts | Mitigation |
+|------|--------------|------------|
+| OOM crash | Phone has ~1 GB free | Stream, free graph, B caps, act-ckpt |
+| Silent numeric bug | Wrong JSON forever | TDD oracle + gradcheck |
+| Graph leak | RSS climbs per step | RSS-flat smoke test |
+| CE looks good, calls wrong | Fake progress | Headline `val_full_call_EM` |
+| Scope: CUDA/FFN early | Never ships A | Hard OOS list |
+| Multi-loss at once | Can't debug | Staged loss Q10 |
+
+Tradeoff: reference CPU is slow. Acceptable for correctness; optimize after
+parity (NEON, fusion, captured graph).
+
+---
+
+## Verification
+
+```bash
+make -C tests
+make smoke MODEL=01-sanity
+# peak_rss_mb <= 900
+make train MODEL=01-sanity
+make eval
+```
+
+Smoke overfit is GO/NO-GO before Pilot. Eval fixtures must lock metric math.
+
+---
+
+## What lives outside this project
+
+* Production multi-turn agents
+* Cloud distributed pretrain on 200B tokens
+* Replacing Cactus mobile runtime wholesale
+* Guaranteeing Needle HF quality without their data/compute
+
+---
+
+## Open questions
+
+Non-blocking decisions go to QUESTIONS.md (Q0–Q12 seeded: HW, freeze, C11,
+Makefile, stream, graph free, RSS, full f32/epochs, tied emb, gate init,
+loss schedule, headline metric, no-FFN). Append new Qs; do not stall the loop.
+
+---
+
+## Doc roles (how this file relates)
+
+| Doc | Role |
+|-----|------|
+| MASTER_PLAN.md | Definitive SoT — implement against this |
+| PLAN.md | Condensed reference during experiments |
+| PLAN.txt | This file — narrative genesis / rationale |
+| program.txt | Agent loop, CAN/CANNOT, results.tsv |
+| QUESTIONS.md | Append-only ADR |
+
+When docs disagree, MASTER_PLAN wins; then fix the others.
